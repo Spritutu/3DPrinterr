@@ -32,7 +32,9 @@
 #if defined(DIGIPOTSS_PIN) && DIGIPOTSS_PIN > -1
 #include <SPI.h>
 #endif
-
+#ifdef LASER
+#include "laser.h"
+#endif // LASER
 
 //===========================================================================
 //=============================public variables  ============================
@@ -51,6 +53,15 @@ static long counter_x,       // Counter variables for the bresenham line tracer
             counter_y,
             counter_z,
             counter_e;
+
+#ifdef LASER
+static long counter_l;
+#endif // LASER
+
+#ifdef LASER_RASTER
+static int counter_raster;
+#endif // LASER_RASTER
+
 volatile static unsigned long step_events_completed; // The number of step events executed in the current block
 #ifdef ADVANCE
   static long advance_rate, advance, final_advance = 0;
@@ -71,9 +82,6 @@ static volatile bool endstop_y_hit=false;
 static volatile bool endstop_z_hit=false;
 #ifdef ABORT_ON_ENDSTOP_HIT_FEATURE_ENABLED
 bool abort_on_endstop_hit = false;
-#endif
-#ifdef MOTOR_CURRENT_PWM_XY_PIN
-  int motor_current_setting[3] = DEFAULT_PWM_MOTOR_CURRENT;
 #endif
 
 static bool old_x_min_endstop=false;
@@ -191,7 +199,7 @@ void checkHitEndstops()
    endstop_x_hit=false;
    endstop_y_hit=false;
    endstop_z_hit=false;
-#if defined(ABORT_ON_ENDSTOP_HIT_FEATURE_ENABLED) && defined(SDSUPPORT)
+#ifdef ABORT_ON_ENDSTOP_HIT_FEATURE_ENABLED
    if (abort_on_endstop_hit)
    {
      card.sdprinting = false;
@@ -325,15 +333,27 @@ ISR(TIMER1_COMPA_vect)
       counter_y = counter_x;
       counter_z = counter_x;
       counter_e = counter_x;
+      #ifdef LASER
+      counter_l = counter_x;
+      #endif //LASER
       step_events_completed = 0;
 
       #ifdef Z_LATE_ENABLE
         if(current_block->steps_z > 0) {
           enable_z();
+          #ifdef MUVE
+            enable_e();
+          #endif //MUVE
           OCR1A = 2000; //1ms wait
           return;
         }
       #endif
+
+      #ifdef LASER_RASTER
+        if (current_block->laser_mode == RASTER) {
+			counter_raster = 0;
+		}
+	  #endif // LASER_RASTER
 
 //      #ifdef ADVANCE
 //      e_steps[current_block->active_extruder] = 0;
@@ -348,6 +368,18 @@ ISR(TIMER1_COMPA_vect)
     // Set directions TO DO This should be done once during init of trapezoid. Endstops -> interrupt
     out_bits = current_block->direction_bits;
 
+	// Continuous firing of the laser during a move happens here, PPM and raster happen further down
+	#ifdef LASER
+	if (current_block->laser_mode == CONTINUOUS && current_block->laser_status == LASER_ON) {
+	  laser_fire(current_block->laser_intensity);
+    }
+    if (current_block->laser_duration > 0 && (current_block->laser_duration + laser.last_firing < micros())) {
+	  laser_extinguish();
+	}
+    if (current_block->laser_status == LASER_OFF) {
+      laser_extinguish();
+    }
+    #endif // LASER
 
     // Set the direction bits (X_AXIS=A_AXIS and Y_AXIS=B_AXIS for COREXY)
     if((out_bits & (1<<X_AXIS))!=0){
@@ -364,7 +396,7 @@ ISR(TIMER1_COMPA_vect)
         }
       #else
         WRITE(X_DIR_PIN, INVERT_X_DIR);
-      #endif        
+      #endif
       count_direction[X_AXIS]=-1;
     }
     else{
@@ -381,25 +413,15 @@ ISR(TIMER1_COMPA_vect)
         }
       #else
         WRITE(X_DIR_PIN, !INVERT_X_DIR);
-      #endif        
+      #endif
       count_direction[X_AXIS]=1;
     }
     if((out_bits & (1<<Y_AXIS))!=0){
       WRITE(Y_DIR_PIN, INVERT_Y_DIR);
-	  
-	  #ifdef Y_DUAL_STEPPER_DRIVERS
-	    WRITE(Y2_DIR_PIN, !(INVERT_Y_DIR == INVERT_Y2_VS_Y_DIR));
-	  #endif
-	  
       count_direction[Y_AXIS]=-1;
     }
     else{
       WRITE(Y_DIR_PIN, !INVERT_Y_DIR);
-	  
-	  #ifdef Y_DUAL_STEPPER_DRIVERS
-	    WRITE(Y2_DIR_PIN, (INVERT_Y_DIR == INVERT_Y2_VS_Y_DIR));
-	  #endif
-	  
       count_direction[Y_AXIS]=1;
     }
 
@@ -413,9 +435,9 @@ ISR(TIMER1_COMPA_vect)
       {
         #ifdef DUAL_X_CARRIAGE
         // with 2 x-carriages, endstops are only checked in the homing direction for the active extruder
-        if ((current_block->active_extruder == 0 && X_HOME_DIR == -1) 
+        if ((current_block->active_extruder == 0 && X_HOME_DIR == -1)
             || (current_block->active_extruder != 0 && X2_HOME_DIR == -1))
-        #endif          
+        #endif
         {
           #if defined(X_MIN_PIN) && X_MIN_PIN > -1
             bool x_min_endstop=(READ(X_MIN_PIN) != X_MIN_ENDSTOP_INVERTING);
@@ -434,9 +456,9 @@ ISR(TIMER1_COMPA_vect)
       {
         #ifdef DUAL_X_CARRIAGE
         // with 2 x-carriages, endstops are only checked in the homing direction for the active extruder
-        if ((current_block->active_extruder == 0 && X_HOME_DIR == 1) 
+        if ((current_block->active_extruder == 0 && X_HOME_DIR == 1)
             || (current_block->active_extruder != 0 && X2_HOME_DIR == 1))
-        #endif          
+        #endif
         {
           #if defined(X_MAX_PIN) && X_MAX_PIN > -1
             bool x_max_endstop=(READ(X_MAX_PIN) != X_MAX_ENDSTOP_INVERTING);
@@ -486,7 +508,7 @@ ISR(TIMER1_COMPA_vect)
 
     if ((out_bits & (1<<Z_AXIS)) != 0) {   // -direction
       WRITE(Z_DIR_PIN,INVERT_Z_DIR);
-      
+
       #ifdef Z_DUAL_STEPPER_DRIVERS
         WRITE(Z2_DIR_PIN,INVERT_Z_DIR);
       #endif
@@ -573,9 +595,9 @@ ISR(TIMER1_COMPA_vect)
           }
         #else
           WRITE(X_STEP_PIN, !INVERT_X_STEP_PIN);
-        #endif        
+        #endif
           counter_x -= current_block->step_event_count;
-          count_position[X_AXIS]+=count_direction[X_AXIS];   
+          count_position[X_AXIS]+=count_direction[X_AXIS];
         #ifdef DUAL_X_CARRIAGE
           if (extruder_duplication_enabled){
             WRITE(X_STEP_PIN, INVERT_X_STEP_PIN);
@@ -595,24 +617,15 @@ ISR(TIMER1_COMPA_vect)
         counter_y += current_block->steps_y;
         if (counter_y > 0) {
           WRITE(Y_STEP_PIN, !INVERT_Y_STEP_PIN);
-		  
-		  #ifdef Y_DUAL_STEPPER_DRIVERS
-			WRITE(Y2_STEP_PIN, !INVERT_Y_STEP_PIN);
-		  #endif
-		  
           counter_y -= current_block->step_event_count;
           count_position[Y_AXIS]+=count_direction[Y_AXIS];
           WRITE(Y_STEP_PIN, INVERT_Y_STEP_PIN);
-		  
-		  #ifdef Y_DUAL_STEPPER_DRIVERS
-			WRITE(Y2_STEP_PIN, INVERT_Y_STEP_PIN);
-		  #endif
         }
 
       counter_z += current_block->steps_z;
       if (counter_z > 0) {
         WRITE(Z_STEP_PIN, !INVERT_Z_STEP_PIN);
-        
+
         #ifdef Z_DUAL_STEPPER_DRIVERS
           WRITE(Z2_STEP_PIN, !INVERT_Z_STEP_PIN);
         #endif
@@ -620,7 +633,7 @@ ISR(TIMER1_COMPA_vect)
         counter_z -= current_block->step_event_count;
         count_position[Z_AXIS]+=count_direction[Z_AXIS];
         WRITE(Z_STEP_PIN, INVERT_Z_STEP_PIN);
-        
+
         #ifdef Z_DUAL_STEPPER_DRIVERS
           WRITE(Z2_STEP_PIN, INVERT_Z_STEP_PIN);
         #endif
@@ -635,13 +648,44 @@ ISR(TIMER1_COMPA_vect)
           WRITE_E_STEP(INVERT_E_STEP_PIN);
         }
       #endif //!ADVANCE
+
+      // steps_l = step count between laser firings
+      //
+      #ifdef LASER
+		counter_l += current_block->steps_l;
+		  if (counter_l > 0) {
+			if (current_block->laser_mode == PULSED && current_block->laser_status == LASER_ON) { // Pulsed Firing Mode
+		  	  laser_fire(current_block->laser_intensity);
+		  	  if (laser.diagnostics) {
+		  	    SERIAL_ECHOPAIR("X: ", counter_x);
+		  	    SERIAL_ECHOPAIR("Y: ", counter_y);
+		  	    SERIAL_ECHOPAIR("L: ", counter_l);
+			  }
+			}
+			#ifdef LASER_RASTER
+			if (current_block->laser_mode == RASTER && current_block->laser_status == LASER_ON) { // Raster Firing Mode
+			  laser_fire(current_block->laser_raster_data[counter_raster]/255.0*100.0);
+			  if (laser.diagnostics) {
+			    SERIAL_ECHO("Pixel: ");
+			    SERIAL_ECHOLN(itostr3(current_block->laser_raster_data[counter_raster]));
+		      }
+		      counter_raster++;
+			}
+			#endif // LASER_RASTER
+		  counter_l -= current_block->step_event_count;
+		  }
+		  if (current_block->laser_duration > 0 && (micros() - laser.last_firing) >= current_block->laser_duration) {
+		    laser_extinguish();
+		  }
+      #endif // LASER
+
       step_events_completed += 1;
       if(step_events_completed >= current_block->step_event_count) break;
     }
     // Calculare new timer value
     unsigned short timer;
     unsigned short step_rate;
-    if (step_events_completed <= (unsigned long int)current_block->accelerate_until) {
+    if (step_events_completed <= (unsigned long int)current_block->accelerate_until) { // Accelerate!
 
       MultiU24X24toH16(acc_step_rate, acceleration_time, current_block->acceleration_rate);
       acc_step_rate += current_block->initial_rate;
@@ -665,7 +709,7 @@ ISR(TIMER1_COMPA_vect)
 
       #endif
     }
-    else if (step_events_completed > (unsigned long int)current_block->decelerate_after) {
+    else if (step_events_completed > (unsigned long int)current_block->decelerate_after) { // Decelerate!
       MultiU24X24toH16(step_rate, deceleration_time, current_block->acceleration_rate);
 
       if(step_rate > acc_step_rate) { // Check step_rate stays positive
@@ -693,7 +737,7 @@ ISR(TIMER1_COMPA_vect)
         old_advance = advance >>8;
       #endif //ADVANCE
     }
-    else {
+    else { // Stay the same (nominal) speed!
       OCR1A = OCR1A_nominal;
       // ensure we're running at the correct step rate, even if we just came off an acceleration
       step_loops = step_loops_nominal;
@@ -778,10 +822,6 @@ void st_init()
   #endif
   #if defined(Y_DIR_PIN) && Y_DIR_PIN > -1
     SET_OUTPUT(Y_DIR_PIN);
-		
-	#if defined(Y_DUAL_STEPPER_DRIVERS) && defined(Y2_DIR_PIN) && (Y2_DIR_PIN > -1)
-	  SET_OUTPUT(Y2_DIR_PIN);
-	#endif
   #endif
   #if defined(Z_DIR_PIN) && Z_DIR_PIN > -1
     SET_OUTPUT(Z_DIR_PIN);
@@ -813,11 +853,6 @@ void st_init()
   #if defined(Y_ENABLE_PIN) && Y_ENABLE_PIN > -1
     SET_OUTPUT(Y_ENABLE_PIN);
     if(!Y_ENABLE_ON) WRITE(Y_ENABLE_PIN,HIGH);
-	
-	#if defined(Y_DUAL_STEPPER_DRIVERS) && defined(Y2_ENABLE_PIN) && (Y2_ENABLE_PIN > -1)
-	  SET_OUTPUT(Y2_ENABLE_PIN);
-	  if(!Y_ENABLE_ON) WRITE(Y2_ENABLE_PIN,HIGH);
-	#endif
   #endif
   #if defined(Z_ENABLE_PIN) && Z_ENABLE_PIN > -1
     SET_OUTPUT(Z_ENABLE_PIN);
@@ -900,10 +935,6 @@ void st_init()
   #if defined(Y_STEP_PIN) && (Y_STEP_PIN > -1)
     SET_OUTPUT(Y_STEP_PIN);
     WRITE(Y_STEP_PIN,INVERT_Y_STEP_PIN);
-    #if defined(Y_DUAL_STEPPER_DRIVERS) && defined(Y2_STEP_PIN) && (Y2_STEP_PIN > -1)
-      SET_OUTPUT(Y2_STEP_PIN);
-      WRITE(Y2_STEP_PIN,INVERT_Y_STEP_PIN);
-    #endif
     disable_y();
   #endif
   #if defined(Z_STEP_PIN) && (Z_STEP_PIN > -1)
@@ -1004,20 +1035,17 @@ long st_get_position(uint8_t axis)
   return count_pos;
 }
 
-#ifdef ENABLE_AUTO_BED_LEVELING
-float st_get_position_mm(uint8_t axis)
-{
-  float steper_position_in_steps = st_get_position(axis);
-  return steper_position_in_steps / axis_steps_per_unit[axis];
-}
-#endif  // ENABLE_AUTO_BED_LEVELING
-
 void finishAndDisableSteppers()
 {
   st_synchronize();
   disable_x();
   disable_y();
   disable_z();
+#ifndef Z_AXIS_IS_LEADSCREW
+  has_axis_homed[Z_AXIS] = false;
+#endif
+  has_axis_homed[X_AXIS] = false;
+  has_axis_homed[Y_AXIS] = false;
   disable_e0();
   disable_e1();
   disable_e2();
@@ -1031,153 +1059,6 @@ void quickStop()
   current_block = NULL;
   ENABLE_STEPPER_DRIVER_INTERRUPT();
 }
-
-#ifdef BABYSTEPPING
-
-
-void babystep(const uint8_t axis,const bool direction)
-{
-  //MUST ONLY BE CALLED BY A ISR, it depends on that no other ISR interrupts this
-    //store initial pin states
-  switch(axis)
-  {
-  case X_AXIS:
-  {
-    enable_x();   
-    uint8_t old_x_dir_pin= READ(X_DIR_PIN);  //if dualzstepper, both point to same direction.
-   
-    //setup new step
-    WRITE(X_DIR_PIN,(INVERT_X_DIR)^direction);
-    #ifdef DUAL_X_CARRIAGE
-      WRITE(X2_DIR_PIN,(INVERT_X_DIR)^direction);
-    #endif
-    
-    //perform step 
-    WRITE(X_STEP_PIN, !INVERT_X_STEP_PIN); 
-    #ifdef DUAL_X_CARRIAGE
-      WRITE(X2_STEP_PIN, !INVERT_X_STEP_PIN);
-    #endif
-    {
-    float x=1./float(axis+1)/float(axis+2); //wait a tiny bit
-    }
-    WRITE(X_STEP_PIN, INVERT_X_STEP_PIN);
-    #ifdef DUAL_X_CARRIAGE
-      WRITE(X2_STEP_PIN, INVERT_X_STEP_PIN);
-    #endif
-
-    //get old pin state back.
-    WRITE(X_DIR_PIN,old_x_dir_pin);
-    #ifdef DUAL_X_CARRIAGE
-      WRITE(X2_DIR_PIN,old_x_dir_pin);
-    #endif
-
-  }
-  break;
-  case Y_AXIS:
-  {
-    enable_y();   
-    uint8_t old_y_dir_pin= READ(Y_DIR_PIN);  //if dualzstepper, both point to same direction.
-   
-    //setup new step
-    WRITE(Y_DIR_PIN,(INVERT_Y_DIR)^direction);
-    #ifdef DUAL_Y_CARRIAGE
-      WRITE(Y2_DIR_PIN,(INVERT_Y_DIR)^direction);
-    #endif
-    
-    //perform step 
-    WRITE(Y_STEP_PIN, !INVERT_Y_STEP_PIN); 
-    #ifdef DUAL_Y_CARRIAGE
-      WRITE(Y2_STEP_PIN, !INVERT_Y_STEP_PIN);
-    #endif
-    {
-    float x=1./float(axis+1)/float(axis+2); //wait a tiny bit
-    }
-    WRITE(Y_STEP_PIN, INVERT_Y_STEP_PIN);
-    #ifdef DUAL_Y_CARRIAGE
-      WRITE(Y2_STEP_PIN, INVERT_Y_STEP_PIN);
-    #endif
-
-    //get old pin state back.
-    WRITE(Y_DIR_PIN,old_y_dir_pin);
-    #ifdef DUAL_Y_CARRIAGE
-      WRITE(Y2_DIR_PIN,old_y_dir_pin);
-    #endif
-
-  }
-  break;
- 
-#ifndef DELTA
-  case Z_AXIS:
-  {
-    enable_z();
-    uint8_t old_z_dir_pin= READ(Z_DIR_PIN);  //if dualzstepper, both point to same direction.
-    //setup new step
-    WRITE(Z_DIR_PIN,(INVERT_Z_DIR)^direction^BABYSTEP_INVERT_Z);
-    #ifdef Z_DUAL_STEPPER_DRIVERS
-      WRITE(Z2_DIR_PIN,(INVERT_Z_DIR)^direction^BABYSTEP_INVERT_Z);
-    #endif
-    //perform step 
-    WRITE(Z_STEP_PIN, !INVERT_Z_STEP_PIN); 
-    #ifdef Z_DUAL_STEPPER_DRIVERS
-      WRITE(Z2_STEP_PIN, !INVERT_Z_STEP_PIN);
-    #endif
-    //wait a tiny bit
-    {
-    float x=1./float(axis+1); //absolutely useless
-    }
-    WRITE(Z_STEP_PIN, INVERT_Z_STEP_PIN);
-    #ifdef Z_DUAL_STEPPER_DRIVERS
-      WRITE(Z2_STEP_PIN, INVERT_Z_STEP_PIN);
-    #endif
-
-    //get old pin state back.
-    WRITE(Z_DIR_PIN,old_z_dir_pin);
-    #ifdef Z_DUAL_STEPPER_DRIVERS
-      WRITE(Z2_DIR_PIN,old_z_dir_pin);
-    #endif
-
-  }
-  break;
-#else //DELTA
-  case Z_AXIS:
-  {
-    enable_x();
-    enable_y();
-    enable_z();
-    uint8_t old_x_dir_pin= READ(X_DIR_PIN);  
-    uint8_t old_y_dir_pin= READ(Y_DIR_PIN);  
-    uint8_t old_z_dir_pin= READ(Z_DIR_PIN);  
-    //setup new step
-    WRITE(X_DIR_PIN,(INVERT_X_DIR)^direction^BABYSTEP_INVERT_Z);
-    WRITE(Y_DIR_PIN,(INVERT_Y_DIR)^direction^BABYSTEP_INVERT_Z);
-    WRITE(Z_DIR_PIN,(INVERT_Z_DIR)^direction^BABYSTEP_INVERT_Z);
-    
-    //perform step 
-    WRITE(X_STEP_PIN, !INVERT_X_STEP_PIN); 
-    WRITE(Y_STEP_PIN, !INVERT_Y_STEP_PIN); 
-    WRITE(Z_STEP_PIN, !INVERT_Z_STEP_PIN); 
-    
-    //wait a tiny bit
-    {
-    float x=1./float(axis+1); //absolutely useless
-    }
-    WRITE(X_STEP_PIN, INVERT_X_STEP_PIN); 
-    WRITE(Y_STEP_PIN, INVERT_Y_STEP_PIN); 
-    WRITE(Z_STEP_PIN, INVERT_Z_STEP_PIN);
-
-    //get old pin state back.
-    WRITE(X_DIR_PIN,old_x_dir_pin);
-    WRITE(Y_DIR_PIN,old_y_dir_pin);
-    WRITE(Z_DIR_PIN,old_z_dir_pin);
-
-  }
-  break;
-#endif
- 
-  default:    break;
-  }
-}
-#endif //BABYSTEPPING
 
 void digitalPotWrite(int address, int value) // From Arduino DigitalPotControl example
 {
@@ -1201,16 +1082,6 @@ void digipot_init() //Initialize Digipot Motor Current
       //digitalPotWrite(digipot_ch[i], digipot_motor_current[i]);
       digipot_current(i,digipot_motor_current[i]);
   #endif
-  #ifdef MOTOR_CURRENT_PWM_XY_PIN
-    pinMode(MOTOR_CURRENT_PWM_XY_PIN, OUTPUT);
-    pinMode(MOTOR_CURRENT_PWM_Z_PIN, OUTPUT);
-    pinMode(MOTOR_CURRENT_PWM_E_PIN, OUTPUT);
-    digipot_current(0, motor_current_setting[0]);
-    digipot_current(1, motor_current_setting[1]);
-    digipot_current(2, motor_current_setting[2]);
-    //Set timer5 to 31khz so the PWM of the motor power is as constant as possible. (removes a buzzing noise)
-    TCCR5B = (TCCR5B & ~(_BV(CS50) | _BV(CS51) | _BV(CS52))) | _BV(CS50);
-  #endif
 }
 
 void digipot_current(uint8_t driver, int current)
@@ -1219,31 +1090,17 @@ void digipot_current(uint8_t driver, int current)
     const uint8_t digipot_ch[] = DIGIPOT_CHANNELS;
     digitalPotWrite(digipot_ch[driver], current);
   #endif
-  #ifdef MOTOR_CURRENT_PWM_XY_PIN
-  if (driver == 0) analogWrite(MOTOR_CURRENT_PWM_XY_PIN, (long)current * 255L / (long)MOTOR_CURRENT_PWM_RANGE);
-  if (driver == 1) analogWrite(MOTOR_CURRENT_PWM_Z_PIN, (long)current * 255L / (long)MOTOR_CURRENT_PWM_RANGE);
-  if (driver == 2) analogWrite(MOTOR_CURRENT_PWM_E_PIN, (long)current * 255L / (long)MOTOR_CURRENT_PWM_RANGE);
-  #endif
 }
 
 void microstep_init()
 {
-  const uint8_t microstep_modes[] = MICROSTEP_MODES;
-
-  #if defined(E1_MS1_PIN) && E1_MS1_PIN > -1
-  pinMode(E1_MS1_PIN,OUTPUT);
-  pinMode(E1_MS2_PIN,OUTPUT); 
-  #endif
-
   #if defined(X_MS1_PIN) && X_MS1_PIN > -1
-  pinMode(X_MS1_PIN,OUTPUT);
-  pinMode(X_MS2_PIN,OUTPUT);  
-  pinMode(Y_MS1_PIN,OUTPUT);
+  const uint8_t microstep_modes[] = MICROSTEP_MODES;
+  pinMode(X_MS2_PIN,OUTPUT);
   pinMode(Y_MS2_PIN,OUTPUT);
-  pinMode(Z_MS1_PIN,OUTPUT);
-  pinMode(Z_MS2_PIN,OUTPUT);  
-  pinMode(E0_MS1_PIN,OUTPUT);
+  pinMode(Z_MS2_PIN,OUTPUT);
   pinMode(E0_MS2_PIN,OUTPUT);
+  pinMode(E1_MS2_PIN,OUTPUT);
   for(int i=0;i<=4;i++) microstep_mode(i,microstep_modes[i]);
   #endif
 }
@@ -1256,9 +1113,7 @@ void microstep_ms(uint8_t driver, int8_t ms1, int8_t ms2)
     case 1: digitalWrite( Y_MS1_PIN,ms1); break;
     case 2: digitalWrite( Z_MS1_PIN,ms1); break;
     case 3: digitalWrite(E0_MS1_PIN,ms1); break;
-    #if defined(E1_MS1_PIN) && E1_MS1_PIN > -1
     case 4: digitalWrite(E1_MS1_PIN,ms1); break;
-    #endif
   }
   if(ms2 > -1) switch(driver)
   {
@@ -1266,9 +1121,7 @@ void microstep_ms(uint8_t driver, int8_t ms1, int8_t ms2)
     case 1: digitalWrite( Y_MS2_PIN,ms2); break;
     case 2: digitalWrite( Z_MS2_PIN,ms2); break;
     case 3: digitalWrite(E0_MS2_PIN,ms2); break;
-    #if defined(E1_MS2_PIN) && E1_MS2_PIN > -1
     case 4: digitalWrite(E1_MS2_PIN,ms2); break;
-    #endif
   }
 }
 
@@ -1299,10 +1152,8 @@ void microstep_readings()
       SERIAL_PROTOCOLPGM("E0: ");
       SERIAL_PROTOCOL(   digitalRead(E0_MS1_PIN));
       SERIAL_PROTOCOLLN( digitalRead(E0_MS2_PIN));
-      #if defined(E1_MS1_PIN) && E1_MS1_PIN > -1
       SERIAL_PROTOCOLPGM("E1: ");
       SERIAL_PROTOCOL(   digitalRead(E1_MS1_PIN));
       SERIAL_PROTOCOLLN( digitalRead(E1_MS2_PIN));
-      #endif
 }
 
