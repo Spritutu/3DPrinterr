@@ -467,6 +467,10 @@ void loop()
   #ifdef SDSUPPORT
   card.checkautostart(false);
   #endif
+  laser_fire(100);
+  SERIAL_ECHO('11111');
+  delay(3000);
+  laser_extinguish();
   if(buflen)
   {
     #ifdef SDSUPPORT
@@ -1225,6 +1229,7 @@ void process_commands()
 #ifdef MUVE_Z_PEEL
   case 6:  //M6 mUVe 1 Laser On for 30 Seconds
     laser_fire(100);
+    SERIAL_ECHO('no');
     delay(30000);
     laser_extinguish();
     break;

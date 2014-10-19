@@ -82,12 +82,12 @@
 // 1 = Single pin control - LOW when off, HIGH when on, PWM to adjust intensity
 // 2 = Two pin control - A firing pin for which LOW = off, HIGH = on, and a separate intensity pin which carries a constant PWM signal and adjusts duty cycle to control intensity
 // 3 = Single pin firing with high speed pulsing configurable by LASER_PWM, power controlled via D9
-#define LASER_CONTROL 3
+#define LASER_CONTROL 1
 
 //// The following defines select which G codes tell the laser to fire.  It's OK to uncomment more than one.
 //#define LASER_FIRE_G1 10 // fire the laser on a G1 move, extinguish when the move ends
-#define LASER_FIRE_SPINDLE 11 // fire the laser on M3, extinguish on M5
-#define LASER_FIRE_E 12 // fire the laser when the E axis moves
+//#define LASER_FIRE_SPINDLE 11 // fire the laser on M3, extinguish on M5
+//#define LASER_FIRE_E 12 // fire the laser when the E axis moves
 
 //// Raster mode enables the laser to etch bitmap data at high speeds.  Increases command buffer size substantially.
 //#define LASER_RASTER
@@ -102,7 +102,7 @@
 
 // Uncomment these options for the mUVe 1 3D printer
  #define CUSTOM_MENDEL_NAME "mUVe1 Printer"
- #define LASER_WATTS 0.05
+ #define LASER_WATTS 0.025
  #define LASER_DIAMETER 0.1 // milimeters
  #define LASER_PWM 8000 // hertz
  #define MUVE_Z_PEEL // The mUVe 1 uses a special peel maneuver between each layer, it requires independent control of each Z motor
@@ -581,7 +581,7 @@ const bool Z_MAX_ENDSTOP_INVERTING = true; // set to true to invert the logic of
 // Servo Endstops
 //
 // This allows for servo actuated endstops, primary usage is for the Z Axis to eliminate calibration or bed height changes.
-// Use M206 command to correct for switch height offset to actual nozzle height. Store that setting with M500.
+// Use M206 command to correct for sfwitch height offset to actual nozzle height. Store that setting with M500.
 //
 //#define SERVO_ENDSTOPS {-1, -1, 0} // Servo index for X, Y, Z. Disable with -1
 //#define SERVO_ENDSTOP_ANGLES {0,0, 0,0, 70,0} // X,Y,Z Axis Extend and Retract angles
